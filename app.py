@@ -17,7 +17,6 @@ DEMO_PASSWORD = "demo"
 st.set_page_config(page_title="ドル円AI短期予測 (5分足固定版)", layout="wide")
 
 # --- UI非表示デザイン (CSS) ---
-# 背景色と文字色の強制指定を削除しました。
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -131,7 +130,7 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
         dist_from_center = (c - center) / (box_width / 2) if box_width > 0 else 0
         correction += dist_from_center * -5.0
 
-    # 長期トレンドフィルター (過学習抑制のため少し厳しく)
+    # 長期トレンドフィルター
     if p < c and trend_direction == 1:
         penalty = 25.0 
         base_prob += penalty 
@@ -146,10 +145,12 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 ---
-def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_window, threshold):
+# --- バックテスト機能 (TP/SL可変版) ---
+def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_window, threshold, tp_pips, sl_pips):
     """
     過去72時間分のデータでテスト。
+    tp_pips: 利確幅(pips)
+    sl_pips: 損切幅(pips)
     """
     df_merged = pd.merge(df_fixed, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], on='ds', how='inner')
     
@@ -158,6 +159,10 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
     
     results = []
     active_trade = None 
+    
+    # pipsを価格差に変換 (1pip = 0.01円)
+    tp_dist = tp_pips * 0.01
+    sl_dist = sl_pips * 0.01
     
     for i in range(len(backtest_data)):
         row = backtest_data.iloc[i]
@@ -186,13 +191,13 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
             
             if hit_sl and hit_tp:
                 outcome = "LOSS"
-                pnl = -15.0
+                pnl = -sl_pips # 両方ヒットは損切とみなす
             elif hit_sl:
                 outcome = "LOSS"
-                pnl = -15.0
+                pnl = -sl_pips
             elif hit_tp:
                 outcome = "WIN"
-                pnl = 15.0
+                pnl = tp_pips
             
             if outcome:
                 exit_price = active_trade['tp'] if outcome == "WIN" else active_trade['sl']
@@ -202,7 +207,7 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                     "売買": active_trade['type'],
                     "Entry": f"{active_trade['entry_price']:.2f}",
                     "Exit": f"{exit_price:.2f}",
-                    "Conf": active_trade['confidence'], # 確率を保存
+                    "Conf": active_trade['confidence'], 
                     "結果": outcome,
                     "P/L(pips)": pnl
                 })
@@ -235,17 +240,15 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 confidence = prob_up
             elif prob_up <= (100.0 - threshold):
                 action = "SELL"
-                confidence = 100.0 - prob_up # 売り確率に変換
+                confidence = 100.0 - prob_up 
                 
             if action:
                 entry_price = c_price
-                tp_dist = 0.15 
-                sl_dist = 0.15 
                 
                 trade_data = {
                     'type': action,
                     'entry_price': entry_price,
-                    'confidence': confidence, # 確率を記録
+                    'confidence': confidence,
                     'start_time': current_time
                 }
                 
@@ -272,14 +275,25 @@ trend_window = 100
 future_configs = [(5, "5分後"), (10, "10分後"), (15, "15分後")]
 past_configs = [(5, "5分前"), (10, "10分前"), (15, "15分前")]
 
-# === 閾値設定 (ラジオボタン) ===
+# === ★設定パネル ===
+st.markdown("##### **🛠️ エントリー・決済設定**")
+
+# エントリー閾値
 entry_threshold = st.radio(
-    "エントリー判定閾値 (%)",
+    "エントリー判定閾値 (確率%)",
     [70, 75, 80],
     index=1,
     horizontal=True,
-    help="AIの確信度がこの数値以上の場合のみエントリーします。"
+    key="threshold_radio"
 )
+
+# 利確と損切の選択
+col1, col2 = st.columns(2)
+with col1:
+    tp_pips = st.radio("利確幅 (Take Profit)", [10, 15], index=1, horizontal=True, key="tp_radio", format_func=lambda x: f"+{x} pips")
+with col2:
+    sl_pips = st.radio("損切幅 (Stop Loss)", [10, 15], index=1, horizontal=True, key="sl_radio", format_func=lambda x: f"-{x} pips")
+
 st.warning("※注意：設定を変更すると基準の時間が最新に変わります")
 
 try:
@@ -342,7 +356,7 @@ try:
 
     st.write(f"**現在値 (5分足): {current_price:,.2f} 円**")
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
-    st.write(f"<span style='font-size:0.9rem; color:#888'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True) # 文字色を少し明るく調整
+    st.write(f"<span style='font-size:0.9rem; color:#888'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
 
     # 過去分析
     st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
@@ -383,21 +397,16 @@ try:
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
         text=[f"{p:.1f}%" for p in probs_up], textposition='auto',
-        # textfont=dict(size=20, color='white', family="Arial Black") # Plotlyのデフォルトに任せる
     ))
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b',
         text=[f"{p:.1f}%" for p in probs_down], textposition='auto',
-        # textfont=dict(size=20, color='white', family="Arial Black") # Plotlyのデフォルトに任せる
     ))
     fig_bar.update_layout(
-        # template="plotly_dark", # テンプレート指定を削除
         height=300, 
         margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
         yaxis=dict(range=[0, 105], showgrid=True, title="確率 (%)"),
         xaxis=dict(showgrid=False),
-        # font=dict(color='white') # フォント色指定を削除
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -421,10 +430,7 @@ try:
     x_max = forecast['ds'].max()
     x_min = df_fixed['ds'].min()
     fig_chart.update_layout(
-        # template="plotly_dark", # テンプレート指定を削除
         height=500, 
-        # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
-        # font=dict(color='white'), # フォント色指定を削除
         xaxis=dict(range=[x_min, x_max], showgrid=True), 
         yaxis=dict(fixedrange=False, showgrid=True)
     )
@@ -433,9 +439,17 @@ try:
     # バックテスト結果
     st.markdown("---")
     st.markdown("### 🔙 **過去72時間のバックテスト (保有継続・時間フィルター版)**")
-    st.markdown("※AIの「判断自信度(%)」を棒グラフで表示しています。(緑=買い、赤=売り)")
     
-    bt_results = perform_backtest_persistent(df_fixed, forecast, min_width_setting, trend_window, entry_threshold)
+    st.markdown(f"""
+    <div style="font-size:0.8rem; color:#888; margin-bottom:10px;">
+    ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。<br>
+    利確 <b>+{tp_pips}pips</b> / 損切 <b>-{sl_pips}pips</b> に到達するまで、時間をまたいでポジションを保有し続けます。<br>
+    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ★ 修正: TP/SLを引数で渡す
+    bt_results = perform_backtest_persistent(df_fixed, forecast, min_width_setting, trend_window, entry_threshold, tp_pips, sl_pips)
     
     if not bt_results.empty:
         total_trades = len(bt_results)
@@ -452,20 +466,18 @@ try:
         
         bt_results['Cumulative_PL'] = bt_results['P/L(pips)'].cumsum()
         
-        # --- 2軸グラフ作成 (左:確率, 右:pips) ---
+        # 2軸グラフ
         fig_pnl = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # 棒グラフの色分け (BUY=緑, SELL=赤)
         bar_colors = []
         for t in bt_results['売買']:
-            if t == 'BUY': bar_colors.append('#00cc96') # 緑
-            else: bar_colors.append('#ff4b4b') # 赤
+            if t == 'BUY': bar_colors.append('#00cc96') 
+            else: bar_colors.append('#ff4b4b') 
 
-        # 1. 確率の棒グラフ (左軸)
         fig_pnl.add_trace(
             go.Bar(
                 x=bt_results['決済日時'], 
-                y=bt_results['Conf'], # 確率を使用
+                y=bt_results['Conf'], 
                 name='AI確度(%)',
                 marker_color=bar_colors,
                 opacity=0.7,
@@ -475,7 +487,6 @@ try:
             secondary_y=False
         )
         
-        # 2. 累積損益の折れ線 (右軸)
         fig_pnl.add_trace(
             go.Scatter(
                 x=bt_results['決済日時'], 
@@ -488,16 +499,12 @@ try:
         )
         
         fig_pnl.update_layout(
-            # template="plotly_dark", # テンプレート指定を削除
             height=400, margin=dict(l=0, r=0, t=30, b=20), 
-            # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
-            # font=dict(color='white'), # フォント色指定を削除
             xaxis=dict(title="決済日時", type='category', showgrid=True),
             showlegend=True,
             legend=dict(orientation="h", y=1.1)
         )
         
-        # 軸の設定
         fig_pnl.update_yaxes(title_text="AI確度 (%)", range=[50, 105], showgrid=True, secondary_y=False)
         fig_pnl.update_yaxes(title_text="累積 pips", showgrid=False, secondary_y=True)
 
