@@ -1,0 +1,6 @@
+streamlit
+yfinance>=0.2.0
+prophet
+plotly
+pandas
+scipy
